@@ -1,7 +1,7 @@
 .{
-    .name = .packet_sniffer,
+    .name = .pacfer,
     .version = "0.0.0",
-    .fingerprint = 0x5dc5fb453928f0ff,
+    .fingerprint = 0xddfa92121bae4409,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{

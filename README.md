@@ -1,4 +1,4 @@
-# packet-sniffer
+# pacfer
 
 Live network traffic sniffer with a full-screen live dashboard. Linux only
 (uses raw `AF_PACKET` sockets, no libpcap dependency).
@@ -25,14 +25,14 @@ Raw sockets need `CAP_NET_RAW`. Interface binding + promiscuous mode also
 need `CAP_NET_ADMIN`:
 
 ```
-sudo setcap cap_net_raw,cap_net_admin+ep ./zig-out/bin/packet_sniffer
+sudo setcap cap_net_raw,cap_net_admin+ep ./zig-out/bin/pacfer
 ```
 
 ```
-./zig-out/bin/packet_sniffer --help
-./zig-out/bin/packet_sniffer wlan0 --dashboard
-./zig-out/bin/packet_sniffer wlan0 --domains-only
-./zig-out/bin/packet_sniffer wlan0 --pcap capture.pcap
+./zig-out/bin/pacfer --help
+./zig-out/bin/pacfer wlan0 --dashboard
+./zig-out/bin/pacfer wlan0 --domains-only
+./zig-out/bin/pacfer wlan0 --pcap capture.pcap
 ```
 
 Or run under `sudo` directly instead of `setcap`.

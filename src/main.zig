@@ -609,7 +609,7 @@ fn renderDashboard(
     const bps = @as(f64, @floatFromInt(session_total)) / elapsed_s;
 
     std.debug.print("\x1b[2J\x1b[H", .{});
-    std.debug.print("packet-sniffer  (ctrl-c to stop)\n", .{});
+    std.debug.print("pacfer  (ctrl-c to stop)\n", .{});
     std.debug.print("========================================\n", .{});
 
     var total_buf: [16]u8 = undefined;
@@ -663,7 +663,7 @@ fn renderDashboard(
 
 fn printUsage() void {
     std.debug.print(
-        \\packet-sniffer [interface] [options]
+        \\pacfer [interface] [options]
         \\
         \\  interface        capture on this NIC in promiscuous mode (see `ip a`)
         \\                   omit to capture all interfaces, own traffic only
@@ -675,11 +675,11 @@ fn printUsage() void {
         \\  --help, -h       show this message
         \\
         \\examples:
-        \\  packet_sniffer
-        \\  packet_sniffer wlan0
-        \\  packet_sniffer wlan0 --dashboard
-        \\  packet_sniffer wlan0 --domains-only
-        \\  packet_sniffer wlan0 --pcap capture.pcap
+        \\  pacfer
+        \\  pacfer wlan0
+        \\  pacfer wlan0 --dashboard
+        \\  pacfer wlan0 --domains-only
+        \\  pacfer wlan0 --pcap capture.pcap
         \\
     , .{});
 }
@@ -729,7 +729,7 @@ pub fn main() !void {
 
     const sock_rc = linux.socket(linux.AF.PACKET, linux.SOCK.RAW, @byteSwap(ETH_P_ALL));
     const sock: i32 = @intCast(checkErrno(sock_rc) catch {
-        std.debug.print("try: sudo setcap cap_net_raw+ep ./zig-out/bin/packet_sniffer\n", .{});
+        std.debug.print("try: sudo setcap cap_net_raw+ep ./zig-out/bin/pacfer\n", .{});
         return error.SocketOpenFailed;
     });
     defer _ = linux.close(sock);
@@ -741,7 +741,7 @@ pub fn main() !void {
         if (!dashboard_mode) {
             std.debug.print("capturing on all interfaces, own traffic only\n", .{});
             std.debug.print("pass an interface name (see `ip a`) to enable promiscuous capture, e.g.:\n", .{});
-            std.debug.print("  ./zig-out/bin/packet_sniffer wlan0\n", .{});
+            std.debug.print("  ./zig-out/bin/pacfer wlan0\n", .{});
             std.debug.print("capturing... (ctrl-c to stop)\n", .{});
         }
     }
@@ -891,7 +891,7 @@ pub fn main() !void {
 }
 
 test "pcap file has valid global header and packet record" {
-    const path = "/tmp/packet_sniffer_test.pcap";
+    const path = "/tmp/pacfer_test.pcap";
     const fd = openPcapFile(path) orelse return error.OpenFailed;
     const fake_frame = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
     writePcapPacket(fd, &fake_frame);
