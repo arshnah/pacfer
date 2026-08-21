@@ -32,6 +32,7 @@ sudo setcap cap_net_raw,cap_net_admin+ep ./zig-out/bin/packet_sniffer
 ./zig-out/bin/packet_sniffer --help
 ./zig-out/bin/packet_sniffer wlan0 --dashboard
 ./zig-out/bin/packet_sniffer wlan0 --domains-only
+./zig-out/bin/packet_sniffer wlan0 --pcap capture.pcap
 ```
 
 Or run under `sudo` directly instead of `setcap`.
