@@ -13,6 +13,67 @@ fn monotonicMs() i64 {
     return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 
+fn realtimeUs() struct { sec: u32, usec: u32 } {
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(linux.CLOCK.REALTIME, &ts);
+    return .{
+        .sec = @intCast(ts.sec),
+        .usec = @intCast(@divTrunc(ts.nsec, 1000)),
+    };
+}
+
+const PcapGlobalHeader = extern struct {
+    magic: u32 align(1) = 0xa1b2c3d4,
+    version_major: u16 align(1) = 2,
+    version_minor: u16 align(1) = 4,
+    thiszone: i32 align(1) = 0,
+    sigfigs: u32 align(1) = 0,
+    snaplen: u32 align(1) = 65535,
+    network: u32 align(1) = 1,
+};
+
+const PcapPacketHeader = extern struct {
+    ts_sec: u32 align(1),
+    ts_usec: u32 align(1),
+    incl_len: u32 align(1),
+    orig_len: u32 align(1),
+};
+
+fn openPcapFile(path: []const u8) ?i32 {
+    var path_buf: [256]u8 = undefined;
+    if (path.len >= path_buf.len - 1) return null;
+    @memcpy(path_buf[0..path.len], path);
+    path_buf[path.len] = 0;
+
+    const fd_rc = linux.open(
+        @ptrCast(&path_buf),
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
+        0o644,
+    );
+    const fd: i32 = @intCast(checkErrno(fd_rc) catch {
+        std.debug.print("could not open pcap file '{s}'\n", .{path});
+        return null;
+    });
+
+    const header = PcapGlobalHeader{};
+    const bytes = std.mem.asBytes(&header);
+    _ = linux.write(fd, bytes.ptr, bytes.len);
+    return fd;
+}
+
+fn writePcapPacket(fd: i32, frame: []const u8) void {
+    const now = realtimeUs();
+    const hdr = PcapPacketHeader{
+        .ts_sec = now.sec,
+        .ts_usec = now.usec,
+        .incl_len = @intCast(frame.len),
+        .orig_len = @intCast(frame.len),
+    };
+    const hdr_bytes = std.mem.asBytes(&hdr);
+    _ = linux.write(fd, hdr_bytes.ptr, hdr_bytes.len);
+    _ = linux.write(fd, frame.ptr, frame.len);
+}
+
 fn handleSigint(sig: linux.SIG) callconv(.c) void {
     _ = sig;
     should_stop = true;
@@ -610,6 +671,7 @@ fn printUsage() void {
         \\options:
         \\  --dashboard      live-updating full screen view instead of scrolling log
         \\  --domains-only   hide rows without a resolved hostname
+        \\  --pcap <file>    also write raw captured packets to a pcap file
         \\  --help, -h       show this message
         \\
         \\examples:
@@ -617,6 +679,7 @@ fn printUsage() void {
         \\  packet_sniffer wlan0
         \\  packet_sniffer wlan0 --dashboard
         \\  packet_sniffer wlan0 --domains-only
+        \\  packet_sniffer wlan0 --pcap capture.pcap
         \\
     , .{});
 }
@@ -635,7 +698,10 @@ pub fn main() !void {
     var argv_buf: [1024]u8 = undefined;
     const args = readCmdlineArgs(&argv_buf);
     var iface: ?[]const u8 = null;
-    for (args) |a| {
+    var pcap_path: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
         if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
             printUsage();
             return;
@@ -643,9 +709,22 @@ pub fn main() !void {
             domains_only = true;
         } else if (std.mem.eql(u8, a, "--dashboard")) {
             dashboard_mode = true;
+        } else if (std.mem.eql(u8, a, "--pcap")) {
+            if (i + 1 < args.len) {
+                i += 1;
+                pcap_path = args[i];
+            } else {
+                std.debug.print("--pcap needs a file path\n", .{});
+                return;
+            }
         } else if (!std.mem.startsWith(u8, a, "--")) {
             iface = a;
         }
+    }
+
+    const pcap_fd: ?i32 = if (pcap_path) |p| openPcapFile(p) else null;
+    defer {
+        if (pcap_fd) |fd| _ = linux.close(fd);
     }
 
     const sock_rc = linux.socket(linux.AF.PACKET, linux.SOCK.RAW, @byteSwap(ETH_P_ALL));
@@ -682,6 +761,8 @@ pub fn main() !void {
         const read_rc = linux.read(sock, &frame_buf, frame_buf.len);
         const n = checkErrno(read_rc) catch continue;
         if (n < @sizeOf(EthHeader)) continue;
+
+        if (pcap_fd) |fd| writePcapPacket(fd, frame_buf[0..n]);
 
         const eth: *const EthHeader = @ptrCast(&frame_buf);
         if (eth.ethertype() != 0x0800) continue;
@@ -807,4 +888,35 @@ pub fn main() !void {
         printTopTalkers(&byte_counts, session_total);
         printTopFlows(&flows);
     }
+}
+
+test "pcap file has valid global header and packet record" {
+    const path = "/tmp/packet_sniffer_test.pcap";
+    const fd = openPcapFile(path) orelse return error.OpenFailed;
+    const fake_frame = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    writePcapPacket(fd, &fake_frame);
+    _ = linux.close(fd);
+
+    const read_fd_rc = linux.open(path, .{ .ACCMODE = .RDONLY }, 0);
+    const read_fd: i32 = @intCast(try checkErrno(read_fd_rc));
+    defer _ = linux.close(read_fd);
+    defer _ = linux.unlink(path);
+
+    var buf: [4096]u8 = undefined;
+    const read_rc = linux.read(read_fd, &buf, buf.len);
+    const n = try checkErrno(read_rc);
+    const contents = buf[0..n];
+
+    try std.testing.expect(contents.len == @sizeOf(PcapGlobalHeader) + @sizeOf(PcapPacketHeader) + fake_frame.len);
+
+    const global: *const PcapGlobalHeader = @ptrCast(@alignCast(contents.ptr));
+    try std.testing.expectEqual(@as(u32, 0xa1b2c3d4), global.magic);
+    try std.testing.expectEqual(@as(u32, 1), global.network);
+
+    const pkt_hdr: *const PcapPacketHeader = @ptrCast(@alignCast(contents.ptr + @sizeOf(PcapGlobalHeader)));
+    try std.testing.expectEqual(@as(u32, fake_frame.len), pkt_hdr.incl_len);
+    try std.testing.expectEqual(@as(u32, fake_frame.len), pkt_hdr.orig_len);
+
+    const payload_start = @sizeOf(PcapGlobalHeader) + @sizeOf(PcapPacketHeader);
+    try std.testing.expectEqualSlices(u8, &fake_frame, contents[payload_start..]);
 }
