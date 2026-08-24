@@ -5,7 +5,33 @@ const ETH_P_ALL: u16 = 0x0003;
 
 var domains_only: bool = false;
 var dashboard_mode: bool = false;
+var no_color: bool = false;
+var sort_by_packets: bool = false;
+var proto_filter: u8 = 0;
 var should_stop: bool = false;
+
+const COL_RESET = "\x1b[0m";
+const COL_ACCENT = "\x1b[38;2;111;232;158m";
+const COL_ACCENT_BG = "\x1b[48;2;111;232;158m\x1b[38;2;13;13;21m";
+const COL_SUBTLE = "\x1b[38;2;92;92;112m";
+const COL_FG = "\x1b[38;2;224;224;240m";
+const COL_TCP = "\x1b[38;2;82;196;232m";
+const COL_UDP = "\x1b[38;2;232;181;82m";
+const COL_ICMP = "\x1b[38;2;193;125;232m";
+const COL_OTHER = "\x1b[38;2;140;140;150m";
+
+fn col(code: []const u8) []const u8 {
+    return if (no_color) "" else code;
+}
+
+fn protoColor(proto: u8) []const u8 {
+    return switch (proto) {
+        1 => col(COL_ICMP),
+        6 => col(COL_TCP),
+        17 => col(COL_UDP),
+        else => col(COL_OTHER),
+    };
+}
 
 fn monotonicMs() i64 {
     var ts: linux.timespec = undefined;
@@ -244,12 +270,30 @@ const UdpHeader = extern struct {
 
 fn tcpFlagsStr(f: u8, buf: []u8) []const u8 {
     var i: usize = 0;
-    if (f & 0x02 != 0) { buf[i] = 'S'; i += 1; }
-    if (f & 0x10 != 0) { buf[i] = 'A'; i += 1; }
-    if (f & 0x01 != 0) { buf[i] = 'F'; i += 1; }
-    if (f & 0x04 != 0) { buf[i] = 'R'; i += 1; }
-    if (f & 0x08 != 0) { buf[i] = 'P'; i += 1; }
-    if (i == 0) { buf[0] = '-'; i = 1; }
+    if (f & 0x02 != 0) {
+        buf[i] = 'S';
+        i += 1;
+    }
+    if (f & 0x10 != 0) {
+        buf[i] = 'A';
+        i += 1;
+    }
+    if (f & 0x01 != 0) {
+        buf[i] = 'F';
+        i += 1;
+    }
+    if (f & 0x04 != 0) {
+        buf[i] = 'R';
+        i += 1;
+    }
+    if (f & 0x08 != 0) {
+        buf[i] = 'P';
+        i += 1;
+    }
+    if (i == 0) {
+        buf[0] = '-';
+        i = 1;
+    }
     return buf[0..i];
 }
 
@@ -472,6 +516,14 @@ fn protocolName(proto: u8) []const u8 {
     };
 }
 
+fn protocolFromArg(name: []const u8) ?u8 {
+    if (std.ascii.eqlIgnoreCase(name, "tcp")) return 6;
+    if (std.ascii.eqlIgnoreCase(name, "udp")) return 17;
+    if (std.ascii.eqlIgnoreCase(name, "icmp")) return 1;
+    if (std.ascii.eqlIgnoreCase(name, "all")) return 0;
+    return null;
+}
+
 const FlowKey = struct {
     src_ip: u32,
     dst_ip: u32,
@@ -485,6 +537,10 @@ const FlowStats = struct {
     packets: u32 = 0,
 };
 
+fn flowRank(row: anytype) u64 {
+    return if (sort_by_packets) row.stats.packets else row.stats.bytes;
+}
+
 fn printTopFlows(flows: *std.AutoHashMap(FlowKey, FlowStats)) void {
     const Row = struct { key: FlowKey, stats: FlowStats };
     var top: [5]Row = [_]Row{.{ .key = undefined, .stats = .{} }} ** 5;
@@ -494,7 +550,7 @@ fn printTopFlows(flows: *std.AutoHashMap(FlowKey, FlowStats)) void {
         if (domains_only and !hasHostLabel(kv.key_ptr.src_ip) and !hasHostLabel(kv.key_ptr.dst_ip)) continue;
         const row = Row{ .key = kv.key_ptr.*, .stats = kv.value_ptr.* };
         var i: usize = 0;
-        while (i < top.len and top[i].stats.bytes >= row.stats.bytes) : (i += 1) {}
+        while (i < top.len and flowRank(top[i]) >= flowRank(row)) : (i += 1) {}
         if (i < top.len) {
             var j = top.len - 1;
             while (j > i) : (j -= 1) top[j] = top[j - 1];
@@ -502,19 +558,19 @@ fn printTopFlows(flows: *std.AutoHashMap(FlowKey, FlowStats)) void {
         }
     }
 
-    std.debug.print("=== top flows ===\n", .{});
+    std.debug.print("{s}=== top flows ==={s}\n", .{ col(COL_ACCENT), col(COL_RESET) });
     var src_buf: [64]u8 = undefined;
     var dst_buf: [64]u8 = undefined;
     for (top) |row| {
         if (row.stats.bytes == 0) continue;
-        std.debug.print("  {s}:{d} -> {s}:{d}  {s}  {d} bytes  {d} pkts\n", .{
-            addrLabel(row.key.src_ip, &src_buf), row.key.src_port,
-            addrLabel(row.key.dst_ip, &dst_buf), row.key.dst_port,
-            protocolName(row.key.protocol),
-            row.stats.bytes, row.stats.packets,
+        std.debug.print("  {s}{s}:{d} -> {s}:{d}{s}  {s}{s}{s}  {d} bytes  {d} pkts\n", .{
+            col(COL_FG),                         addrLabel(row.key.src_ip, &src_buf), row.key.src_port,
+            addrLabel(row.key.dst_ip, &dst_buf), row.key.dst_port,                    col(COL_RESET),
+            protoColor(row.key.protocol),        protocolName(row.key.protocol),      col(COL_RESET),
+            row.stats.bytes,                     row.stats.packets,
         });
     }
-    std.debug.print("==================\n", .{});
+    std.debug.print("{s}==================={s}\n", .{ col(COL_ACCENT), col(COL_RESET) });
 }
 
 fn formatBytes(n: u64, buf: []u8) []const u8 {
@@ -594,6 +650,99 @@ fn printTopTalkers(counts: *std.AutoHashMap(u32, u64), session_total: u64) void 
     std.debug.print("-------------------\n", .{});
 }
 
+const BLOCK_FULL = "\xe2\x96\x88";
+const BLOCK_LIGHT = "\xe2\x96\x91";
+const SPARK_CHARS = [8][]const u8{
+    "\xe2\x96\x81", "\xe2\x96\x82", "\xe2\x96\x83", "\xe2\x96\x84",
+    "\xe2\x96\x85", "\xe2\x96\x86", "\xe2\x96\x87", "\xe2\x96\x88",
+};
+
+fn fillBar(buf: []u8, filled: usize, width: usize) []const u8 {
+    var pos: usize = 0;
+    var i: usize = 0;
+    while (i < filled and i < width) : (i += 1) {
+        @memcpy(buf[pos .. pos + BLOCK_FULL.len], BLOCK_FULL);
+        pos += BLOCK_FULL.len;
+    }
+    while (i < width) : (i += 1) {
+        @memcpy(buf[pos .. pos + BLOCK_LIGHT.len], BLOCK_LIGHT);
+        pos += BLOCK_LIGHT.len;
+    }
+    return buf[0..pos];
+}
+
+const BAR_WIDTH = 24;
+
+const ThroughputHistory = struct {
+    samples: [48]f64 = [_]f64{0} ** 48,
+    len: usize = 0,
+    write_idx: usize = 0,
+
+    fn push(self: *ThroughputHistory, v: f64) void {
+        self.samples[self.write_idx] = v;
+        self.write_idx = (self.write_idx + 1) % self.samples.len;
+        if (self.len < self.samples.len) self.len += 1;
+    }
+
+    fn render(self: *ThroughputHistory, buf: []u8) []const u8 {
+        if (self.len == 0) return "";
+        var max: f64 = 0;
+        var i: usize = 0;
+        while (i < self.len) : (i += 1) {
+            if (self.samples[i] > max) max = self.samples[i];
+        }
+        var pos: usize = 0;
+        const start = if (self.len < self.samples.len) 0 else self.write_idx;
+        i = 0;
+        while (i < self.len) : (i += 1) {
+            const idx = (start + i) % self.samples.len;
+            const v = self.samples[idx];
+            const level: usize = if (max <= 0) 0 else @intFromFloat(@min(7.0, (v / max) * 7.0));
+            const ch = SPARK_CHARS[level];
+            @memcpy(buf[pos .. pos + ch.len], ch);
+            pos += ch.len;
+        }
+        return buf[0..pos];
+    }
+};
+
+var throughput_history: ThroughputHistory = .{};
+
+const ProtoTotals = struct {
+    icmp: u64 = 0,
+    tcp: u64 = 0,
+    udp: u64 = 0,
+    other: u64 = 0,
+
+    fn add(self: *ProtoTotals, proto: u8, len: u16) void {
+        switch (proto) {
+            1 => self.icmp += len,
+            6 => self.tcp += len,
+            17 => self.udp += len,
+            else => self.other += len,
+        }
+    }
+
+    fn total(self: ProtoTotals) u64 {
+        return self.icmp + self.tcp + self.udp + self.other;
+    }
+};
+
+var proto_totals: ProtoTotals = .{};
+
+fn renderProtoRow(label: []const u8, color: []const u8, bytes: u64, grand_total: u64) void {
+    if (bytes == 0) return;
+    var bar_buf: [BAR_WIDTH * 3]u8 = undefined;
+    const pct = if (grand_total == 0) 0.0 else @as(f64, @floatFromInt(bytes)) / @as(f64, @floatFromInt(grand_total)) * 100.0;
+    const filled: usize = @intFromFloat(@min(@as(f64, BAR_WIDTH), pct / 100.0 * BAR_WIDTH));
+    var b_buf: [16]u8 = undefined;
+    std.debug.print("  {s}{s:<5}{s} {s}{s}{s}  {d:>5.1}%  {s}\n", .{
+        color, label,                                col(COL_RESET),
+        color, fillBar(&bar_buf, filled, BAR_WIDTH), col(COL_RESET),
+        pct,   formatBytes(bytes, &b_buf),
+    });
+}
+
 fn renderDashboard(
     counts: *std.AutoHashMap(u32, u64),
     flows: *std.AutoHashMap(FlowKey, FlowStats),
@@ -609,30 +758,56 @@ fn renderDashboard(
     const bps = @as(f64, @floatFromInt(session_total)) / elapsed_s;
 
     std.debug.print("\x1b[2J\x1b[H", .{});
-    std.debug.print("pacfer  (ctrl-c to stop)\n", .{});
-    std.debug.print("========================================\n", .{});
+    std.debug.print("{s} pacfer {s}  {s}ctrl-c to stop{s}\n", .{
+        col(COL_ACCENT_BG), col(COL_RESET), col(COL_SUBTLE), col(COL_RESET),
+    });
+    std.debug.print("\n", .{});
 
     var total_buf: [16]u8 = undefined;
     var rate_buf: [16]u8 = undefined;
-    std.debug.print("total data used : {s}\n", .{formatBytes(session_total, &total_buf)});
-    std.debug.print("throughput      : {d:.0} pkt/s, {s}/s\n", .{ pps, formatBytes(@intFromFloat(bps), &rate_buf) });
+    std.debug.print("  {s}{s}{s}  {s}total{s}    {s}{d:.0} pkt/s, {s}/s{s}  {s}throughput{s}\n", .{
+        col(COL_FG),    formatBytes(session_total, &total_buf), col(COL_RESET),                             col(COL_SUBTLE), col(COL_RESET),
+        col(COL_FG),    pps,                                    formatBytes(@intFromFloat(bps), &rate_buf), col(COL_RESET),  col(COL_SUBTLE),
+        col(COL_RESET),
+    });
 
     if (bucket_count > 0) {
         var top_buf: [16]u8 = undefined;
-        std.debug.print("most data used  : {s} ({s})\n", .{
-            buckets[0].label[0..buckets[0].label_len],
-            formatBytes(buckets[0].bytes, &top_buf),
+        std.debug.print("  {s}{s}{s} {s}({s}){s}  {s}most active{s}\n", .{
+            col(COL_FG),     buckets[0].label[0..buckets[0].label_len], col(COL_RESET),
+            col(COL_ACCENT), formatBytes(buckets[0].bytes, &top_buf),   col(COL_RESET),
+            col(COL_SUBTLE), col(COL_RESET),
         });
     }
 
-    std.debug.print("\n--- top hosts ---\n", .{});
-    const shown = @min(bucket_count, 8);
-    for (buckets[0..shown]) |b| {
+    throughput_history.push(bps);
+    var spark_buf: [48 * 3]u8 = undefined;
+    std.debug.print("\n  {s}throughput{s}  {s}{s}{s}\n", .{
+        col(COL_SUBTLE), col(COL_RESET), col(COL_ACCENT), throughput_history.render(&spark_buf), col(COL_RESET),
+    });
+
+    std.debug.print("\n{s}protocol mix{s}\n", .{ col(COL_ACCENT), col(COL_RESET) });
+    const grand_total = proto_totals.total();
+    renderProtoRow("TCP", col(COL_TCP), proto_totals.tcp, grand_total);
+    renderProtoRow("UDP", col(COL_UDP), proto_totals.udp, grand_total);
+    renderProtoRow("ICMP", col(COL_ICMP), proto_totals.icmp, grand_total);
+    renderProtoRow("OTHER", col(COL_OTHER), proto_totals.other, grand_total);
+
+    std.debug.print("\n{s}top hosts{s}\n", .{ col(COL_ACCENT), col(COL_RESET) });
+    const host_max = if (bucket_count > 0) buckets[0].bytes else 1;
+    const shown_hosts = @min(bucket_count, 8);
+    for (buckets[0..shown_hosts]) |b| {
+        var bar_buf: [BAR_WIDTH * 3]u8 = undefined;
         var b_buf: [16]u8 = undefined;
-        std.debug.print("  {s}  {s}\n", .{ b.label[0..b.label_len], formatBytes(b.bytes, &b_buf) });
+        const filled: usize = @intFromFloat(@as(f64, @floatFromInt(b.bytes)) / @as(f64, @floatFromInt(host_max)) * BAR_WIDTH);
+        std.debug.print("  {s}{s:<22}{s} {s}{s}{s}  {s}\n", .{
+            col(COL_FG),                  b.label[0..b.label_len],              col(COL_RESET),
+            col(COL_ACCENT),              fillBar(&bar_buf, filled, BAR_WIDTH), col(COL_RESET),
+            formatBytes(b.bytes, &b_buf),
+        });
     }
 
-    std.debug.print("\n--- top flows ---\n", .{});
+    std.debug.print("\n{s}top flows{s}\n", .{ col(COL_ACCENT), col(COL_RESET) });
     const FlowRow = struct { key: FlowKey, stats: FlowStats };
     var top: [8]FlowRow = [_]FlowRow{.{ .key = undefined, .stats = .{} }} ** 8;
     var it = flows.iterator();
@@ -640,7 +815,7 @@ fn renderDashboard(
         if (domains_only and !hasHostLabel(kv.key_ptr.src_ip) and !hasHostLabel(kv.key_ptr.dst_ip)) continue;
         const row = FlowRow{ .key = kv.key_ptr.*, .stats = kv.value_ptr.* };
         var i: usize = 0;
-        while (i < top.len and top[i].stats.bytes >= row.stats.bytes) : (i += 1) {}
+        while (i < top.len and flowRank(top[i]) >= flowRank(row)) : (i += 1) {}
         if (i < top.len) {
             var j = top.len - 1;
             while (j > i) : (j -= 1) top[j] = top[j - 1];
@@ -652,10 +827,10 @@ fn renderDashboard(
     for (top) |row| {
         if (row.stats.bytes == 0) continue;
         var f_buf: [16]u8 = undefined;
-        std.debug.print("  {s}:{d} -> {s}:{d}  {s}  {s}  {d} pkts\n", .{
-            addrLabel(row.key.src_ip, &src_buf), row.key.src_port,
-            addrLabel(row.key.dst_ip, &dst_buf), row.key.dst_port,
-            protocolName(row.key.protocol),
+        std.debug.print("  {s}{s}:{d} \xe2\x86\x92 {s}:{d}{s}  {s}{s:<5}{s}  {s}  {d} pkts\n", .{
+            col(COL_FG),                          addrLabel(row.key.src_ip, &src_buf), row.key.src_port,
+            addrLabel(row.key.dst_ip, &dst_buf),  row.key.dst_port,                    col(COL_RESET),
+            protoColor(row.key.protocol),         protocolName(row.key.protocol),      col(COL_RESET),
             formatBytes(row.stats.bytes, &f_buf), row.stats.packets,
         });
     }
@@ -669,15 +844,18 @@ fn printUsage() void {
         \\                   omit to capture all interfaces, own traffic only
         \\
         \\options:
-        \\  --dashboard      live-updating full screen view instead of scrolling log
+        \\  --dashboard      live-updating full screen view with sparklines and bars
         \\  --domains-only   hide rows without a resolved hostname
+        \\  --proto <name>   only capture tcp, udp, icmp, or all (default: all)
+        \\  --sort <by>      rank top flows/hosts by bytes or packets (default: bytes)
+        \\  --no-color       disable ANSI colors, e.g. when piping output
         \\  --pcap <file>    also write raw captured packets to a pcap file
         \\  --help, -h       show this message
         \\
         \\examples:
         \\  pacfer
-        \\  pacfer wlan0
         \\  pacfer wlan0 --dashboard
+        \\  pacfer wlan0 --dashboard --proto tcp
         \\  pacfer wlan0 --domains-only
         \\  pacfer wlan0 --pcap capture.pcap
         \\
@@ -709,6 +887,34 @@ pub fn main() !void {
             domains_only = true;
         } else if (std.mem.eql(u8, a, "--dashboard")) {
             dashboard_mode = true;
+        } else if (std.mem.eql(u8, a, "--no-color")) {
+            no_color = true;
+        } else if (std.mem.eql(u8, a, "--proto")) {
+            if (i + 1 < args.len) {
+                i += 1;
+                proto_filter = protocolFromArg(args[i]) orelse {
+                    std.debug.print("--proto must be one of: tcp, udp, icmp, all\n", .{});
+                    return;
+                };
+            } else {
+                std.debug.print("--proto needs a value\n", .{});
+                return;
+            }
+        } else if (std.mem.eql(u8, a, "--sort")) {
+            if (i + 1 < args.len) {
+                i += 1;
+                if (std.ascii.eqlIgnoreCase(args[i], "packets")) {
+                    sort_by_packets = true;
+                } else if (std.ascii.eqlIgnoreCase(args[i], "bytes")) {
+                    sort_by_packets = false;
+                } else {
+                    std.debug.print("--sort must be one of: bytes, packets\n", .{});
+                    return;
+                }
+            } else {
+                std.debug.print("--sort needs a value\n", .{});
+                return;
+            }
         } else if (std.mem.eql(u8, a, "--pcap")) {
             if (i + 1 < args.len) {
                 i += 1;
@@ -775,8 +981,11 @@ pub fn main() !void {
         if (ihl < @sizeOf(Ipv4Header)) continue;
         const l4_offset = ip_offset + ihl;
 
+        if (proto_filter != 0 and ip.protocol != proto_filter) continue;
+
         session_total += ip.totalLen();
         packets_seen += 1;
+        proto_totals.add(ip.protocol, ip.totalLen());
 
         const gop_src = byte_counts.getOrPut(ip.src_be) catch continue;
         if (!gop_src.found_existing) gop_src.value_ptr.* = 0;
@@ -808,8 +1017,10 @@ pub fn main() !void {
                 }
 
                 recordFlow(&flows, .{
-                    .src_ip = ip.src_be, .dst_ip = ip.dst_be,
-                    .src_port = tcp.srcPort(), .dst_port = tcp.dstPort(),
+                    .src_ip = ip.src_be,
+                    .dst_ip = ip.dst_be,
+                    .src_port = tcp.srcPort(),
+                    .dst_port = tcp.dstPort(),
                     .protocol = ip.protocol,
                 }, ip.totalLen());
 
@@ -817,12 +1028,10 @@ pub fn main() !void {
                     const src_str = addrLabel(ip.src_be, &ip_buf_src);
                     const dst_str = addrLabel(ip.dst_be, &ip_buf_dst);
                     const svc = wellKnownService(tcp.srcPort()) orelse wellKnownService(tcp.dstPort());
-                    std.debug.print("{s}:{d} -> {s}:{d}  TCP [{s}]{s}{s}  len={d}\n", .{
-                        src_str, tcp.srcPort(), dst_str, tcp.dstPort(),
-                        tcpFlagsStr(tcp.flags(), &flags_buf),
-                        if (svc != null) " " else "",
-                        svc orelse "",
-                        ip.totalLen(),
+                    std.debug.print("{s}:{d} -> {s}:{d}  {s}TCP{s} [{s}]{s}{s}  len={d}\n", .{
+                        src_str,       tcp.srcPort(),  dst_str,                              tcp.dstPort(),
+                        col(COL_TCP),  col(COL_RESET), tcpFlagsStr(tcp.flags(), &flags_buf), if (svc != null) " " else "",
+                        svc orelse "", ip.totalLen(),
                     });
                 }
             },
@@ -838,8 +1047,10 @@ pub fn main() !void {
                 }
 
                 recordFlow(&flows, .{
-                    .src_ip = ip.src_be, .dst_ip = ip.dst_be,
-                    .src_port = udp.srcPort(), .dst_port = udp.dstPort(),
+                    .src_ip = ip.src_be,
+                    .dst_ip = ip.dst_be,
+                    .src_port = udp.srcPort(),
+                    .dst_port = udp.dstPort(),
                     .protocol = ip.protocol,
                 }, ip.totalLen());
 
@@ -847,26 +1058,27 @@ pub fn main() !void {
                     const src_str = addrLabel(ip.src_be, &ip_buf_src);
                     const dst_str = addrLabel(ip.dst_be, &ip_buf_dst);
                     const svc = wellKnownService(udp.srcPort()) orelse wellKnownService(udp.dstPort());
-                    std.debug.print("{s}:{d} -> {s}:{d}  UDP{s}{s}  len={d}\n", .{
-                        src_str, udp.srcPort(), dst_str, udp.dstPort(),
-                        if (svc != null) " " else "",
-                        svc orelse "",
+                    std.debug.print("{s}:{d} -> {s}:{d}  {s}UDP{s}{s}{s}  len={d}\n", .{
+                        src_str,       udp.srcPort(),  dst_str,                      udp.dstPort(),
+                        col(COL_UDP),  col(COL_RESET), if (svc != null) " " else "", svc orelse "",
                         ip.totalLen(),
                     });
                 }
             },
             else => {
                 recordFlow(&flows, .{
-                    .src_ip = ip.src_be, .dst_ip = ip.dst_be,
-                    .src_port = 0, .dst_port = 0,
+                    .src_ip = ip.src_be,
+                    .dst_ip = ip.dst_be,
+                    .src_port = 0,
+                    .dst_port = 0,
                     .protocol = ip.protocol,
                 }, ip.totalLen());
 
                 if (!dashboard_mode and (!domains_only or hasHostLabel(ip.src_be) or hasHostLabel(ip.dst_be))) {
                     const src_str = addrLabel(ip.src_be, &ip_buf_src);
                     const dst_str = addrLabel(ip.dst_be, &ip_buf_dst);
-                    std.debug.print("{s} -> {s}  proto={s}  len={d}\n", .{
-                        src_str, dst_str, protocolName(ip.protocol), ip.totalLen(),
+                    std.debug.print("{s} -> {s}  proto={s}{s}{s}  len={d}\n", .{
+                        src_str, dst_str, protoColor(ip.protocol), protocolName(ip.protocol), col(COL_RESET), ip.totalLen(),
                     });
                 }
             },
@@ -919,4 +1131,25 @@ test "pcap file has valid global header and packet record" {
 
     const payload_start = @sizeOf(PcapGlobalHeader) + @sizeOf(PcapPacketHeader);
     try std.testing.expectEqualSlices(u8, &fake_frame, contents[payload_start..]);
+}
+
+test "protocolFromArg parses known names" {
+    try std.testing.expectEqual(@as(?u8, 6), protocolFromArg("tcp"));
+    try std.testing.expectEqual(@as(?u8, 17), protocolFromArg("UDP"));
+    try std.testing.expectEqual(@as(?u8, 1), protocolFromArg("icmp"));
+    try std.testing.expectEqual(@as(?u8, 0), protocolFromArg("all"));
+    try std.testing.expectEqual(@as(?u8, null), protocolFromArg("bogus"));
+}
+
+test "ProtoTotals adds bytes to the right bucket" {
+    var totals: ProtoTotals = .{};
+    totals.add(6, 100);
+    totals.add(17, 50);
+    totals.add(1, 10);
+    totals.add(99, 5);
+    try std.testing.expectEqual(@as(u64, 100), totals.tcp);
+    try std.testing.expectEqual(@as(u64, 50), totals.udp);
+    try std.testing.expectEqual(@as(u64, 10), totals.icmp);
+    try std.testing.expectEqual(@as(u64, 5), totals.other);
+    try std.testing.expectEqual(@as(u64, 165), totals.total());
 }
